@@ -569,6 +569,26 @@ if __name__ == "__main__":
                     'Assignment_Matrix_f': alg_map[lhs]['Assignment_Matrix'],
                     'Assignment_Matrix_g': alg_map[rhs]['Assignment_Matrix'],
                 })
+        if 'LPT_f' in alg_map and 'LPT_g' in alg_map:
+            f_f = float(alg_map['LPT_f']['f(x)'])
+            f_g = float(alg_map['LPT_g']['f(x)'])
+            g_f = float(alg_map['LPT_f']['g(x)'])
+            g_g = float(alg_map['LPT_g']['g(x)'])
+            fg_checks_rows.append({
+                'CaseID': case_id,
+                'Iteration': iteration,
+                'Pair': 'LPT_f_vs_LPT_g',
+                'Cluster_Size': str(capacities),
+                'Sensing_Range': str(sensing_range),
+                'f(x_f*)': f_f,
+                'f(x_g*)': f_g,
+                'g(x_f*)': g_f,
+                'g(x_g*)': g_g,
+                'f_values_different': abs(f_f - f_g) > 1e-10,
+                'g_values_different': abs(g_f - g_g) > 1e-10,
+                'Assignment_Matrix_f': alg_map['LPT_f']['Assignment_Matrix'],
+                'Assignment_Matrix_g': alg_map['LPT_g']['Assignment_Matrix'],
+            })
 
         processed_cases.append(int(case_id))
 
