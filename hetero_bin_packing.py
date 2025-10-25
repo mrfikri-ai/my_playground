@@ -1,5 +1,6 @@
 import math
 import time
+from functools import lru_cache
 from typing import Sequence, Union, List, Optional, Set, Tuple
 from datetime import datetime
 import pandas as pd
@@ -15,6 +16,8 @@ APPEND_BRUTEFORCE_RESULT_ROW = True
 # Number of decimal places for rounding in output formatting
 ROUND_DIGITS = 4
 LOOKAHEAD_EPS = 1e-12
+LOOKAHEAD_CACHE_DIGITS = 12
+LOOKAHEAD_DEPTHS = [0, 1, 2, 3, 4, 5]
 
 # ---------------------------
 # Objective functions
@@ -95,6 +98,11 @@ def _simulate_lpt_g_loads(loads: List[float], caps: List[float], remaining_items
     return sim_loads
 
 
+def _loads_to_cache_key(loads: Sequence[float]) -> Tuple[float, ...]:
+    """Round loads so they can be memoized reliably in lookahead recursion."""
+    return tuple(round(val, LOOKAHEAD_CACHE_DIGITS) for val in loads)
+
+
 # ---------------------------
 # LPT-f and LPT-g only
 # ---------------------------
@@ -102,11 +110,13 @@ def lpt_f_partition(items: List[Union[int, float]],
                     capacities: Sequence[Union[int, float]],
                     alpha: float = 2.0,
                     delta: float = 1e-5,
-                    lookahead: bool = False) -> List[List[Union[int, float]]]:
+                    lookahead_depth: Union[int, bool] = 0) -> List[List[Union[int, float]]]:
     """LPT-f (two-phase) for f(x) = Σ_j (c_j - S_j)^2.
 
-    When ``lookahead`` is True, each placement considers a one-step lookahead using
-    the f-objective to break ties while preserving the original priority rules.
+    ``lookahead_depth`` controls how many future placements are explored with full
+    branching before falling back to the baseline heuristic simulation. ``0``
+    reproduces the classic algorithm, ``1`` matches the previous one-step
+    lookahead, and larger depths expand the search tree accordingly.
     """
     if not capacities:
         raise ValueError("capacities must be non-empty")
@@ -125,12 +135,37 @@ def lpt_f_partition(items: List[Union[int, float]],
     xs_sorted = sorted(xs, reverse=True)
     n = len(xs_sorted)
 
+    depth_int = int(lookahead_depth)
+    if depth_int < 0:
+        raise ValueError("lookahead_depth must be non-negative")
+
+    @lru_cache(maxsize=None)
+    def _project(loads_key: Tuple[float, ...], remaining_items: Tuple[float, ...], depth: int) -> float:
+        if not remaining_items:
+            return objective(loads_key, capacities=caps)
+        if depth <= 0:
+            future_loads = _simulate_lpt_f_loads(list(loads_key), caps, remaining_items)
+            return objective(future_loads, capacities=caps)
+        next_item = remaining_items[0]
+        rest = remaining_items[1:]
+        loads_list = list(loads_key)
+        empty_idxs = [j for j, load in enumerate(loads_list) if load == 0.0]
+        candidate_bins = empty_idxs if empty_idxs else list(range(m))
+        best_score = math.inf
+        for j in candidate_bins:
+            trial_loads = loads_list[:]
+            trial_loads[j] += next_item
+            score = _project(_loads_to_cache_key(trial_loads), rest, depth - 1)
+            if score < best_score - LOOKAHEAD_EPS:
+                best_score = score
+        return best_score
+
     for idx, x in enumerate(xs_sorted):
         remaining = xs_sorted[idx + 1:]
         empty_idxs = [j for j in range(m) if loads[j] == 0.0]
         candidate_bins = empty_idxs if empty_idxs else list(range(m))
 
-        if lookahead and remaining:
+        if depth_int > 0 and remaining:
             best_j = None
             best_score = math.inf
             best_priority: Optional[Tuple[float, float]] = None
@@ -138,8 +173,7 @@ def lpt_f_partition(items: List[Union[int, float]],
                 priority = (caps[j], -j) if empty_idxs else (caps[j] - loads[j], -j)
                 trial_loads = loads[:]
                 trial_loads[j] += x
-                future_loads = _simulate_lpt_f_loads(trial_loads, caps, remaining)
-                score = objective(future_loads, capacities=caps)
+                score = _project(_loads_to_cache_key(trial_loads), tuple(remaining), depth_int - 1)
                 if best_j is None or score < best_score - LOOKAHEAD_EPS:
                     best_j = j
                     best_score = score
@@ -165,12 +199,14 @@ def lpt_f_partition(items: List[Union[int, float]],
 
 def lpt_g_partition(items: List[Union[int, float]],
                           capacities: Sequence[Union[int, float]],
-                          lookahead: bool = False) -> List[List[Union[int, float]]]:
+                          lookahead_depth: Union[int, bool] = 0) -> List[List[Union[int, float]]]:
     """LPT-g (ratio rule): for each item in descending order, assign to the bin
     with the smallest normalized load ℓ_j / c_j (ties → smallest index).
 
-    When ``lookahead`` is True, a one-step lookahead using the g-objective is applied
-    to break ties while preserving the base ratio ordering.
+    ``lookahead_depth`` mirrors :func:`lpt_f_partition`, expanding how many future
+    placements are explored via branching before reverting to the baseline ratio
+    simulation. ``0`` is the classic heuristic; ``1`` is the former one-step
+    lookahead; larger values extend the preview horizon.
     """
     if not capacities:
         raise ValueError("capacities must be non-empty")
@@ -185,10 +221,32 @@ def lpt_g_partition(items: List[Union[int, float]],
     bins: List[List[Union[int, float]]] = [[] for _ in range(k)]
     loads: List[float] = [0.0] * k
 
+    depth_int = int(lookahead_depth)
+    if depth_int < 0:
+        raise ValueError("lookahead_depth must be non-negative")
+
+    @lru_cache(maxsize=None)
+    def _project(loads_key: Tuple[float, ...], remaining_items: Tuple[float, ...], depth: int) -> float:
+        if not remaining_items:
+            return g_objective(loads_key, capacities=caps)
+        if depth <= 0:
+            future_loads = _simulate_lpt_g_loads(list(loads_key), caps, remaining_items)
+            return g_objective(future_loads, capacities=caps)
+        next_item = remaining_items[0]
+        rest = remaining_items[1:]
+        best_score = math.inf
+        for j in range(k):
+            trial_loads = list(loads_key)
+            trial_loads[j] += next_item
+            score = _project(_loads_to_cache_key(trial_loads), rest, depth - 1)
+            if score < best_score - LOOKAHEAD_EPS:
+                best_score = score
+        return best_score
+
     xs_sorted = sorted(xs, reverse=True)
     for idx, s in enumerate(xs_sorted):
         remaining = xs_sorted[idx + 1:]
-        if lookahead and remaining:
+        if depth_int > 0 and remaining:
             best_j = None
             best_score = math.inf
             best_priority: Optional[Tuple[float, float]] = None
@@ -196,8 +254,7 @@ def lpt_g_partition(items: List[Union[int, float]],
                 priority = (loads[j] / caps[j], j)
                 trial_loads = loads[:]
                 trial_loads[j] += s
-                future_loads = _simulate_lpt_g_loads(trial_loads, caps, remaining)
-                score = g_objective(future_loads, capacities=caps)
+                score = _project(_loads_to_cache_key(trial_loads), tuple(remaining), depth_int - 1)
                 if best_j is None or score < best_score - LOOKAHEAD_EPS:
                     best_j = j
                     best_score = score
@@ -509,12 +566,16 @@ if __name__ == "__main__":
 
         print(f"\n=== Processing CaseID {case_id} ===\n")
 
-        heuristic_algos = {
-            "LPT_f": lambda items: lpt_f_partition(items, capacities, alpha=20.0, delta=1e-5, lookahead=False),
-            "LPT_f_Lookahead": lambda items: lpt_f_partition(items, capacities, alpha=20.0, delta=1e-5, lookahead=True),
-            "LPT_g": lambda items: lpt_g_partition(items, capacities, lookahead=False),
-            "LPT_g_Lookahead": lambda items: lpt_g_partition(items, capacities, lookahead=True),
-        }
+        heuristic_algos = {}
+        for depth in LOOKAHEAD_DEPTHS:
+            f_name = "LPT_f" if depth == 0 else f"LPT_f_Lookahead_d{depth}"
+            g_name = "LPT_g" if depth == 0 else f"LPT_g_Lookahead_d{depth}"
+            heuristic_algos[f_name] = (
+                lambda items, d=depth: lpt_f_partition(items, capacities, alpha=20.0, delta=1e-5, lookahead_depth=d)
+            )
+            heuristic_algos[g_name] = (
+                lambda items, d=depth: lpt_g_partition(items, capacities, lookahead_depth=d)
+            )
 
         ranked_by_makespan, ranked_by_f, ranked_by_g, opt_f, opt_g, brute_force_time, case_results = (
             brute_force_and_rank_solutions(
@@ -542,13 +603,11 @@ if __name__ == "__main__":
 
         all_results.extend(case_results)
 
-        # Build f/g check row for LPT_f vs LPT_g
+        # Build f/g check rows comparing corresponding LPT-f and LPT-g depths
         alg_map = {r['Algorithm']: r for r in case_results if 'Algorithm' in r}
-        comparison_pairs = [
-            ('LPT_f', 'LPT_g', 'LPT_f_vs_LPT_g'),
-            ('LPT_f_Lookahead', 'LPT_g_Lookahead', 'LPT_f_LA_vs_LPT_g_LA'),
-        ]
-        for lhs, rhs, pair_name in comparison_pairs:
+        for depth in LOOKAHEAD_DEPTHS:
+            lhs = "LPT_f" if depth == 0 else f"LPT_f_Lookahead_d{depth}"
+            rhs = "LPT_g" if depth == 0 else f"LPT_g_Lookahead_d{depth}"
             if lhs in alg_map and rhs in alg_map:
                 f_lhs = float(alg_map[lhs]['f(x)'])
                 f_rhs = float(alg_map[rhs]['f(x)'])
@@ -557,7 +616,7 @@ if __name__ == "__main__":
                 fg_checks_rows.append({
                     'CaseID': case_id,
                     'Iteration': iteration,
-                    'Pair': pair_name,
+                    'Pair': f"{lhs}_vs_{rhs}",
                     'Cluster_Size': str(capacities),
                     'Sensing_Range': str(sensing_range),
                     'f(x_f*)': f_lhs,
@@ -569,26 +628,6 @@ if __name__ == "__main__":
                     'Assignment_Matrix_f': alg_map[lhs]['Assignment_Matrix'],
                     'Assignment_Matrix_g': alg_map[rhs]['Assignment_Matrix'],
                 })
-        if 'LPT_f' in alg_map and 'LPT_g' in alg_map:
-            f_f = float(alg_map['LPT_f']['f(x)'])
-            f_g = float(alg_map['LPT_g']['f(x)'])
-            g_f = float(alg_map['LPT_f']['g(x)'])
-            g_g = float(alg_map['LPT_g']['g(x)'])
-            fg_checks_rows.append({
-                'CaseID': case_id,
-                'Iteration': iteration,
-                'Pair': 'LPT_f_vs_LPT_g',
-                'Cluster_Size': str(capacities),
-                'Sensing_Range': str(sensing_range),
-                'f(x_f*)': f_f,
-                'f(x_g*)': f_g,
-                'g(x_f*)': g_f,
-                'g(x_g*)': g_g,
-                'f_values_different': abs(f_f - f_g) > 1e-10,
-                'g_values_different': abs(g_f - g_g) > 1e-10,
-                'Assignment_Matrix_f': alg_map['LPT_f']['Assignment_Matrix'],
-                'Assignment_Matrix_g': alg_map['LPT_g']['Assignment_Matrix'],
-            })
 
         processed_cases.append(int(case_id))
 
@@ -609,11 +648,12 @@ if __name__ == "__main__":
     # Compact renaming
     algorithm_codes = {
         'LPT_f': 'LPTf',
-        'LPT_f_Lookahead': 'LPTfLA',
         'LPT_g': 'LPTg',
-        'LPT_g_Lookahead': 'LPTgLA',
         'BruteForce': 'BF'
     }
+    for depth in LOOKAHEAD_DEPTHS[1:]:
+        algorithm_codes[f'LPT_f_Lookahead_d{depth}'] = f'LPTfLA{depth}'
+        algorithm_codes[f'LPT_g_Lookahead_d{depth}'] = f'LPTgLA{depth}'
     metric_suffix_map = {
         'Assignment_Matrix': 'A',
         'Assignment_Matrix_g': 'Ag',
@@ -637,7 +677,11 @@ if __name__ == "__main__":
 
     # Column ordering
     desired_cols = ['Cluster_Size','Iteration','Sensing_Range']
-    order_codes = ['LPTf','LPTfLA','LPTg','LPTgLA','BF']
+    order_codes = ['LPTf']
+    order_codes.extend(f'LPTfLA{depth}' for depth in LOOKAHEAD_DEPTHS[1:])
+    order_codes.append('LPTg')
+    order_codes.extend(f'LPTgLA{depth}' for depth in LOOKAHEAD_DEPTHS[1:])
+    order_codes.append('BF')
     for code in order_codes:
         for suff in ['A','Ag','t','f','gapf','g','gapg','rf','rf_full','rg','rg_full']:
             col = f'{code}_{suff}'
