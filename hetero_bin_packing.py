@@ -510,8 +510,10 @@ if __name__ == "__main__":
         print(f"\n=== Processing CaseID {case_id} ===\n")
 
         heuristic_algos = {
-            "LPT_f": lambda items: lpt_f_partition(items, capacities, alpha=20.0, delta=1e-5, lookahead=True),
-            "LPT_g": lambda items: lpt_g_partition(items, capacities, lookahead=True),
+            "LPT_f": lambda items: lpt_f_partition(items, capacities, alpha=20.0, delta=1e-5, lookahead=False),
+            "LPT_f_Lookahead": lambda items: lpt_f_partition(items, capacities, alpha=20.0, delta=1e-5, lookahead=True),
+            "LPT_g": lambda items: lpt_g_partition(items, capacities, lookahead=False),
+            "LPT_g_Lookahead": lambda items: lpt_g_partition(items, capacities, lookahead=True),
         }
 
         ranked_by_makespan, ranked_by_f, ranked_by_g, opt_f, opt_g, brute_force_time, case_results = (
@@ -542,6 +544,31 @@ if __name__ == "__main__":
 
         # Build f/g check row for LPT_f vs LPT_g
         alg_map = {r['Algorithm']: r for r in case_results if 'Algorithm' in r}
+        comparison_pairs = [
+            ('LPT_f', 'LPT_g', 'LPT_f_vs_LPT_g'),
+            ('LPT_f_Lookahead', 'LPT_g_Lookahead', 'LPT_f_LA_vs_LPT_g_LA'),
+        ]
+        for lhs, rhs, pair_name in comparison_pairs:
+            if lhs in alg_map and rhs in alg_map:
+                f_lhs = float(alg_map[lhs]['f(x)'])
+                f_rhs = float(alg_map[rhs]['f(x)'])
+                g_lhs = float(alg_map[lhs]['g(x)'])
+                g_rhs = float(alg_map[rhs]['g(x)'])
+                fg_checks_rows.append({
+                    'CaseID': case_id,
+                    'Iteration': iteration,
+                    'Pair': pair_name,
+                    'Cluster_Size': str(capacities),
+                    'Sensing_Range': str(sensing_range),
+                    'f(x_f*)': f_lhs,
+                    'f(x_g*)': f_rhs,
+                    'g(x_f*)': g_lhs,
+                    'g(x_g*)': g_rhs,
+                    'f_values_different': abs(f_lhs - f_rhs) > 1e-10,
+                    'g_values_different': abs(g_lhs - g_rhs) > 1e-10,
+                    'Assignment_Matrix_f': alg_map[lhs]['Assignment_Matrix'],
+                    'Assignment_Matrix_g': alg_map[rhs]['Assignment_Matrix'],
+                })
         if 'LPT_f' in alg_map and 'LPT_g' in alg_map:
             f_f = float(alg_map['LPT_f']['f(x)'])
             f_g = float(alg_map['LPT_g']['f(x)'])
@@ -582,7 +609,9 @@ if __name__ == "__main__":
     # Compact renaming
     algorithm_codes = {
         'LPT_f': 'LPTf',
+        'LPT_f_Lookahead': 'LPTfLA',
         'LPT_g': 'LPTg',
+        'LPT_g_Lookahead': 'LPTgLA',
         'BruteForce': 'BF'
     }
     metric_suffix_map = {
@@ -608,7 +637,7 @@ if __name__ == "__main__":
 
     # Column ordering
     desired_cols = ['Cluster_Size','Iteration','Sensing_Range']
-    order_codes = ['LPTf','LPTg','BF']
+    order_codes = ['LPTf','LPTfLA','LPTg','LPTgLA','BF']
     for code in order_codes:
         for suff in ['A','Ag','t','f','gapf','g','gapg','rf','rf_full','rg','rg_full']:
             col = f'{code}_{suff}'
