@@ -149,9 +149,11 @@ def lpt_f_partition(items: List[Union[int, float]],
         next_item = remaining_items[0]
         rest = remaining_items[1:]
         loads_list = list(loads_key)
+        empty_idxs = [j for j, load in enumerate(loads_list) if load == 0.0]
+        candidate_bins = empty_idxs if empty_idxs else list(range(m))
         best_score = math.inf
         seen_states: Set[Tuple[float, ...]] = set()
-        for j in range(m):
+        for j in candidate_bins:
             trial_loads = loads_list[:]
             trial_loads[j] += next_item
             trial_key = _loads_to_cache_key(trial_loads)
@@ -171,11 +173,12 @@ def lpt_f_partition(items: List[Union[int, float]],
             best_j = None
             best_score = math.inf
             best_priority: Optional[Tuple[float, float]] = None
-            for j in range(m):
-                if loads[j] == 0.0:
-                    priority = (2.0, caps[j], -j)
+            candidate_bins = empty_idxs if empty_idxs else list(range(m))
+            for j in candidate_bins:
+                if empty_idxs:
+                    priority = (caps[j], -j)
                 else:
-                    priority = (1.0, caps[j] - loads[j], -j)
+                    priority = (caps[j] - loads[j], -j)
                 trial_loads = loads[:]
                 trial_loads[j] += x
                 score = _project(_loads_to_cache_key(trial_loads), tuple(remaining), depth_int - 1)
