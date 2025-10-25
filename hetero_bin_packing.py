@@ -149,13 +149,16 @@ def lpt_f_partition(items: List[Union[int, float]],
         next_item = remaining_items[0]
         rest = remaining_items[1:]
         loads_list = list(loads_key)
-        empty_idxs = [j for j, load in enumerate(loads_list) if load == 0.0]
-        candidate_bins = empty_idxs if empty_idxs else list(range(m))
         best_score = math.inf
-        for j in candidate_bins:
+        seen_states: Set[Tuple[float, ...]] = set()
+        for j in range(m):
             trial_loads = loads_list[:]
             trial_loads[j] += next_item
-            score = _project(_loads_to_cache_key(trial_loads), rest, depth - 1)
+            trial_key = _loads_to_cache_key(trial_loads)
+            if trial_key in seen_states:
+                continue
+            seen_states.add(trial_key)
+            score = _project(trial_key, rest, depth - 1)
             if score < best_score - LOOKAHEAD_EPS:
                 best_score = score
         return best_score
@@ -163,14 +166,16 @@ def lpt_f_partition(items: List[Union[int, float]],
     for idx, x in enumerate(xs_sorted):
         remaining = xs_sorted[idx + 1:]
         empty_idxs = [j for j in range(m) if loads[j] == 0.0]
-        candidate_bins = empty_idxs if empty_idxs else list(range(m))
 
         if depth_int > 0 and remaining:
             best_j = None
             best_score = math.inf
             best_priority: Optional[Tuple[float, float]] = None
-            for j in candidate_bins:
-                priority = (caps[j], -j) if empty_idxs else (caps[j] - loads[j], -j)
+            for j in range(m):
+                if loads[j] == 0.0:
+                    priority = (2.0, caps[j], -j)
+                else:
+                    priority = (1.0, caps[j] - loads[j], -j)
                 trial_loads = loads[:]
                 trial_loads[j] += x
                 score = _project(_loads_to_cache_key(trial_loads), tuple(remaining), depth_int - 1)
@@ -187,6 +192,7 @@ def lpt_f_partition(items: List[Union[int, float]],
                 raise RuntimeError("Failed to select a bin during LPT-f lookahead phase")
             j_star = best_j
         else:
+            candidate_bins = empty_idxs if empty_idxs else list(range(m))
             if empty_idxs:
                 j_star = max(empty_idxs, key=lambda j: (caps[j], -j))
             else:
